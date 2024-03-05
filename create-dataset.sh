@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-OUTDIR="../data"
+OUTDIR="./data"
 if [ ! -e $OUTDIR ] ; then
     echo $OUTDIR does not exist!
 fi
