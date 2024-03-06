@@ -2,7 +2,7 @@ FROM python:3.11-alpine as build
 
 RUN apk update
 RUN apk add libspatialindex-dev --repository=http://dl-cdn.alpinelinux.org/alpine/edge/testing/
-RUN apk add gdal-dev build-base
+RUN apk add gdal-dev build-base musl-dev proj proj-dev proj-util geos-dev
 
 ADD ./requirements.txt .
 RUN mkdir /wheels
@@ -12,7 +12,7 @@ RUN pip wheel GDAL -w /wheels --global-option=build_ext --global-option="-I/usr/
 FROM python:3.11-alpine
 RUN mkdir /wheels
 COPY --from=build /wheels /wheels
-RUN apk add gdal-dev
+RUN apk add gdal-dev proj proj-dev proj-util
 RUN pip install /wheels/*.whl
 RUN pip install gunicorn gevent eventlet
 RUN rm -rf /wheels

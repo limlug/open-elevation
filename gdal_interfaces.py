@@ -5,6 +5,7 @@ from os import listdir
 from os.path import isfile, join, getsize
 import json
 from rtree import index
+import re
 
 # Originally based on https://stackoverflow.com/questions/13439357/extract-point-from-raster-in-gdal
 class GDALInterface(object):
@@ -28,11 +29,10 @@ class GDALInterface(object):
     def loadMetadata(self):
         # open the raster and its spatial reference
         self.src = gdal.Open(self.tif_path)
-
         if self.src is None:
             raise Exception('Could not load GDAL file "%s"' % self.tif_path)
+        self.projection = int(re.findall('AUTHORITY\[\"EPSG\",\"\d+\"', self.src.GetProjection())[-1].split(",")[-1][1:-1])
         spatial_reference_raster = osr.SpatialReference(self.src.GetProjection())
-
         # get the WGS84 spatial reference
         spatial_reference = osr.SpatialReference()
         spatial_reference.ImportFromEPSG(4326)  # WGS84
@@ -54,20 +54,22 @@ class GDALInterface(object):
     def print_statistics(self):
         print(self.src.GetRasterBand(1).GetStatistics(True, True))
 
-
     def lookup(self, lat, lon):
         try:
 
             # get coordinate of the raster
-            xgeo, ygeo, zgeo = self.coordinate_transform.TransformPoint(lon, lat, 0)
+            if self.projection == 25832:
+                xgeo, ygeo, zgeo = self.coordinate_transform.TransformPoint(lat, lon, 0)
+            else:
+                xgeo, ygeo, zgeo = self.coordinate_transform.TransformPoint(lon, lat, 0)
 
+            # convert it to pixel/line on band
             # convert it to pixel/line on band
             u = xgeo - self.geo_transform_inv[0]
             v = ygeo - self.geo_transform_inv[3]
             # FIXME this int() is probably bad idea, there should be half cell size thing needed
             xpix = int(self.geo_transform_inv[1] * u + self.geo_transform_inv[2] * v)
             ylin = int(self.geo_transform_inv[4] * u + self.geo_transform_inv[5] * v)
-
             # look the value up
             v = self.points_array[ylin, xpix]
 
@@ -85,8 +87,9 @@ class GDALInterface(object):
     def __exit__(self, type, value, traceback):
         self.close()
 
+
 class GDALTileInterface(object):
-    def __init__(self, tiles_folder, summary_file, open_interfaces_size=5):
+    def __init__(self, tiles_folder, summary_file, open_interfaces_size=5, projection=4326):
         super(GDALTileInterface, self).__init__()
         self.tiles_folder = tiles_folder
         self.summary_file = summary_file
@@ -94,6 +97,13 @@ class GDALTileInterface(object):
         self.cached_open_interfaces = []
         self.cached_open_interfaces_dict = {}
         self.open_interfaces_size = open_interfaces_size
+        self.projection = projection
+        start_proj = osr.SpatialReference()
+        start_proj.ImportFromEPSG(4326)
+        target_proj = osr.SpatialReference()
+        target_proj.ImportFromEPSG(self.projection)
+        self.projection_transform = osr.CoordinateTransformation(start_proj, target_proj)
+        self.projection_transform_inv = osr.CoordinateTransformation(target_proj, start_proj)
 
     def _open_gdal_interface(self, path):
         if path in self.cached_open_interfaces_dict:
@@ -127,22 +137,28 @@ class GDALTileInterface(object):
     def create_summary_json(self):
         all_coords = []
         for file in self._all_files():
-            full_path = join(self.tiles_folder,file)
-            print('Processing %s ... (%s MB)' % (full_path, getsize(full_path) / 2**20))
+            full_path = join(self.tiles_folder, file)
+            print('Processing %s ... (%s MB)' % (full_path, getsize(full_path) / 2 ** 20))
             i = self._open_gdal_interface(full_path)
             coords = i.get_corner_coords()
 
             lmin, lmax = coords['BOTTOM_RIGHT'][1], coords['TOP_RIGHT'][1]
             lngmin, lngmax = coords['TOP_LEFT'][0], coords['TOP_RIGHT'][0]
+
+            # Projection transformation
+            if self.projection != 4326:
+                lmin, lngmin, _ = self.projection_transform_inv.TransformPoint(lngmin, lmin, 0)
+                lmax, lngmax, _ = self.projection_transform_inv.TransformPoint(lngmax, lmax, 0)
+
             all_coords += [
                 {
                     'file': full_path,
-                    'coords': ( lmin,  # latitude min
-                                lmax,  # latitude max
-                                lngmin,  # longitude min
-                                lngmax,  # longitude max
+                    'coords': (lmin,  # latitude min
+                               lmax,  # latitude max
+                               lngmin,  # longitude min
+                               lngmax,  # longitude max
 
-                                )
+                               )
                 }
             ]
             print('\tDone! LAT (%s,%s) | LNG (%s,%s)' % (lmin, lmax, lngmin, lngmax))
@@ -169,6 +185,7 @@ class GDALTileInterface(object):
             coords = nearest[0].object
 
             gdal_interface = self._open_gdal_interface(coords['file'])
+
             return int(gdal_interface.lookup(lat, lng))
 
     def _build_index(self):
@@ -177,4 +194,4 @@ class GDALTileInterface(object):
         for e in self.all_coords:
             e['index_id'] = index_id
             left, bottom, right, top = (e['coords'][0], e['coords'][2], e['coords'][1], e['coords'][3])
-            self.index.insert( index_id, (left, bottom, right, top), obj=e)
+            self.index.insert(index_id, (left, bottom, right, top), obj=e)

@@ -4,3 +4,6 @@ flask==3.0.2
 Jinja2
 markupsafe
 lazy
+shapely
+geopandas
+pandas

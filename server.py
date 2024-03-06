@@ -1,7 +1,11 @@
-import json
 from flask import Flask, jsonify, request, g, send_file
 import os
 from gdal_interfaces import GDALTileInterface
+import json
+from shapely.ops import unary_union
+from shapely.geometry import Polygon, Point
+import geopandas as gpd
+import pandas as pd
 
 app = Flask(__name__)
 
@@ -11,25 +15,42 @@ class InternalException(ValueError):
     """
     pass
 
-DATA_FOLDER = os.environ.get("DATA_FOLDER", "data/")
+DATA_CONFIG = os.environ.get("DATA_CONFIG", "./data-config.json")
 OPEN_INTERFACES_SIZE = os.environ.get('OPEN_INTERFACES', 8)
 URL_ENDPOINT = os.environ.get('URL_ENDPOINT', '/api/v1/lookup')
 ALWAYS_REBUILD_SUMMARY = os.environ.get('ALWAYS_REBUILD_SUMMARY', False)
 
+config_store = {}
 
+
+def read_data_config():
+    config_json = json.load(open(DATA_CONFIG, "r"))
+    for key in config_json.keys():
+        data = config_json[key]
+        data_list = []
+        for entry in data:
+            interface =  GDALTileInterface(entry["path"], '%s/summary.json' % entry["path"], OPEN_INTERFACES_SIZE, projection=entry["projection"])
+            if interface.has_summary_json() and not ALWAYS_REBUILD_SUMMARY:
+                print('Re-using existing summary JSON')
+                interface.read_summary_json()
+            else:
+                print('Creating summary JSON ...')
+                interface.create_summary_json()
+            summary_json = json.load(open(f"{entry['path']}/summary.json", "r"))
+            boundaryPoly = gpd.GeoSeries(unary_union([Polygon(((x["coords"][0], x["coords"][2]), (x["coords"][1], x["coords"][2]),
+                                                 (x["coords"][1], x["coords"][3]), (x["coords"][0], x["coords"][3]))) for
+                                        x in summary_json]))
+
+            data_list.append({"boundary": boundaryPoly, "interface": interface})
+        outer_boundary = gpd.GeoSeries(unary_union(gpd.GeoSeries(pd.concat([x["boundary"] for x in data_list], ignore_index=True))))
+        config_store[key] = {"boundary": outer_boundary, "data": data_list}
 
 
 """
 Initialize a global interface. This can grow quite large, because it has a cache.
 """
-interface = GDALTileInterface(DATA_FOLDER, '%s/summary.json' % DATA_FOLDER, OPEN_INTERFACES_SIZE)
+read_data_config()
 
-if interface.has_summary_json() and not ALWAYS_REBUILD_SUMMARY:
-    print('Re-using existing summary JSON')
-    interface.read_summary_json()
-else:
-    print('Creating summary JSON ...')
-    interface.create_summary_json()
 
 def get_elevation(lat, lng):
     """
@@ -39,7 +60,31 @@ def get_elevation(lat, lng):
     :return:
     """
     try:
-        elevation = interface.lookup(lat, lng)
+        # Get best interface
+        found_key = None
+        for key in sorted(list(config_store.keys())):
+            if config_store[key]["boundary"].contains(Point(lat, lng)).any():
+                found_key = key
+                break
+        if found_key is None:
+            return {
+                'latitude': lat,
+                'longitude': lng,
+                'error': 'No matching elevation dataset'
+            }
+        found_interface = None
+        for i in range(len(config_store[found_key]["data"])):
+            if config_store[found_key]["data"][i]["boundary"].contains(Point(lat, lng)).any():
+                found_interface = config_store[found_key]["data"][i]["interface"]
+                break
+        if found_interface is None:
+            # Shouldnt happen
+            return {
+                'latitude': lat,
+                'longitude': lng,
+                'error': 'No matching interface'
+            }
+        elevation = found_interface.lookup(lat, lng)
     except:
         return {
             'latitude': lat,
